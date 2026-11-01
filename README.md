@@ -13,7 +13,6 @@ Gen LRC Lyrics is a General Purpose Plugin for Winamp-compatible players, design
 - Support for lyrics without timestamps.
 - Adjustable synchronization offset.
 - Seek through the song by double-clicking a lyric line.
-- Customizable font.
 - Always-on-top window option.
 - Saves window position and plugin settings.
 
@@ -77,9 +76,7 @@ O Gen LRC Lyrics é um General Purpose Plugin para players compatíveis com Wina
 - Suporte a letras sem marcações de tempo.
 - Ajuste manual de sincronização.
 - Navegação pela música ao clicar duas vezes em uma linha da letra.
-- Personalização da fonte.
 - Opção de manter a janela sempre visível.
-- Salvamento da posição da janela e das configurações.
 
 ## Compatibilidade
 
