@@ -50,6 +50,16 @@ The compiled plugin is `gen_lrclyrics.dll`.
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE).
 
+## AI-Assisted Development
+
+Gen LRC Lyrics was developed with substantial assistance from artificial intelligence.
+
+The initial C++ source code and build scripts were generated with AI assistance. AI was also used throughout the development process for implementation guidance, code adjustments, troubleshooting and documentation.
+
+The project creator was responsible for defining the project goals, directing development, compiling and integrating the files, performing practical tests, validating functionality, creating the visual assets, configuring the installer and publishing the project.
+
+AI was used as a development tool, while the project creator managed and carried out the development process.
+
 ---
 
 # Gen LRC Lyrics (Português)
