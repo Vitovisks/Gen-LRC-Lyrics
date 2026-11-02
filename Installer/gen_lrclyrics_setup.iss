@@ -1,6 +1,6 @@
 
 #define MyAppName "Gen LRC Lyrics"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Vitin"
 
 [Setup]
