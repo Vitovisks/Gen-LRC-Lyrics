@@ -1,6 +1,6 @@
 # Gen LRC Lyrics
 
-**A synchronized lyrics plugin for Winamp and WACUP.**
+**A synchronized lyrics plugin for WACUP.**
 
 Gen LRC Lyrics is a General Purpose Plugin for Winamp-compatible players, designed to display synchronized lyrics in a dedicated window.
 
@@ -14,6 +14,8 @@ Gen LRC Lyrics is a General Purpose Plugin for Winamp-compatible players, design
 - Adjustable synchronization offset.
 - Seek through the song by double-clicking a lyric line.
 - Always-on-top window option.
+- Native WACUP window integration, following the current skin.
+- Show or hide the lyrics window through WACUP's windows menu.
 - Saves window position and plugin settings.
 
 ## Compatibility
@@ -28,6 +30,7 @@ Gen LRC Lyrics is a General Purpose Plugin for Winamp-compatible players, design
 3. Select your WACUP installation folder if it is not detected automatically.
 4. Complete the installation.
 5. Open WACUP and enable Gen LRC Lyrics in the plugin settings, if necessary.
+6. Open or hide the lyrics window through WACUP's windows menu.
 
 ## Building from source
 
@@ -63,7 +66,7 @@ AI was used as a development tool, while the project creator managed and carried
 
 # Gen LRC Lyrics (Português)
 
-**Um plugin de letras sincronizadas para Winamp e WACUP.**
+**Um plugin de letras sincronizadas para WACUP.**
 
 O Gen LRC Lyrics é um General Purpose Plugin para players compatíveis com Winamp, desenvolvido para exibir letras sincronizadas em uma janela própria.
 
@@ -77,6 +80,9 @@ O Gen LRC Lyrics é um General Purpose Plugin para players compatíveis com Wina
 - Ajuste manual de sincronização.
 - Navegação pela música ao clicar duas vezes em uma linha da letra.
 - Opção de manter a janela sempre visível.
+- Integração com o sistema nativo de janelas do WACUP, acompanhando a skin atual.
+- Opção de mostrar ou ocultar a janela de letras pelo menu de janelas do WACUP.
+- Salva a posição da janela e as configurações do plugin.
 
 ## Compatibilidade
 
@@ -90,6 +96,7 @@ O Gen LRC Lyrics é um General Purpose Plugin para players compatíveis com Wina
 3. Se a pasta do WACUP não for detectada automaticamente, selecione-a manualmente.
 4. Conclua a instalação.
 5. Abra o WACUP e habilite o Gen LRC Lyrics nas configurações de plugins, caso necessário.
+6. Abra ou oculte a janela de letras pelo menu de janelas do WACUP.
 
 ## Compilação
 
