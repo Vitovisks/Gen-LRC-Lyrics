@@ -1,8 +1,8 @@
-// gen_lrclyrics.cpp  (v1.1)
+// gen_lrclyrics.cpp  (v1.1.0)
 // Plugin geral (gen_*.dll) para WACUP / Winamp 5.x - 32 bits (x86)
 //
-// Mostra a letra sincronizada da musica que esta tocando, numa janela escura
-// sem moldura, que fica sempre acima da janela do WACUP.
+// A janela de letras e integrada ao sistema de janelas do WACUP via
+// IPC_GET_EMBEDIF (borda, barra de titulo e skin ficam por conta do WACUP).
 //
 // De onde vem a letra (nesta ordem; da pra inverter pelo menu):
 //   1) arquivo .lrc com o mesmo nome da musica, na mesma pasta
@@ -71,6 +71,43 @@ struct winampGeneralPurposePlugin
 #define IPC_GETPLAYLISTFILE   211   // char*    (wParam = indice)
 #define IPC_GETPLAYLISTFILEW  214   // wchar_t* (wParam = indice)
 #define IPC_GETINIDIRECTORY   335   // char* pasta de configuracoes
+#define IPC_GET_EMBEDIF       505   // interface de janela integrada do Winamp/WACUP
+#define IPC_ADJUST_OPTIONSMENUPOS 280
+#define IPC_GET_HMENU         281
+#define IPC_GETSKININFO       633
+#define ID_MAINWINDOW_MENU    40258
+#define ID_GENLRC_MENU        48883
+
+// Estrutura embedWindowState do SDK Winamp (build x86). Mantida completa para
+// que o WACUP possa usar os campos internos sem incompatibilidade de tamanho.
+typedef struct embedWindowState embedWindowState;
+typedef int (CALLBACK *FFCALLBACK)(embedWindowState*, INT, LPARAM);
+struct embedWindowState
+{
+    HWND me;
+    int flags;
+    RECT r;
+    void* user_ptr;
+    union
+    {
+#pragma pack(push, 1)
+        struct
+        {
+            embedWindowState* link;
+            intptr_t attached;
+            intptr_t padding1[2];
+            GUID guid;
+            FFCALLBACK callback;
+            intptr_t padding2[52];
+            intptr_t hostcount;
+            intptr_t reparenting;
+            void* wasabi_window;
+        };
+#pragma pack(pop)
+        intptr_t extra_data[64];
+    };
+};
+typedef HWND (*embedWindow_t)(embedWindowState*);
 
 // ---------------------------------------------------------------------------
 // Estado global
@@ -100,7 +137,26 @@ enum
 };
 
 static HWND      g_hwndWA = NULL;     // janela principal do WACUP
-static HWND      g_hwnd   = NULL;     // nossa janela
+static HWND      g_hwnd   = NULL;     // area cliente com as letras
+static HWND      g_embedFrame = NULL; // moldura criada pelo WACUP
+static embedWindowState* g_ews = NULL;
+static WNDPROC g_oldEmbedProc = NULL;
+static WNDPROC g_oldMainProc = NULL;
+static bool g_menuAdded = false;
+
+// --- Abertura adiada ---------------------------------------------------------
+// A moldura nasce escondida e so e mostrada depois que a janela principal do
+// WACUP aparece (kStartupAfterMainMs de folga). kStartupMaxMs e o limite para o
+// caso de o WACUP iniciar oculto/minimizado.
+static const UINT  kStartupTimerId     = 2;
+static const UINT  kStartupPollMs      = 100;
+static const DWORD kStartupAfterMainMs = 0;
+static const DWORD kStartupMaxMs       = 6000;
+static bool  g_startupPending = false;
+static bool  g_mainSeen       = false;
+static DWORD g_startupT0      = 0;
+static DWORD g_mainSeenT0     = 0;
+
 static HINSTANCE g_hInst  = NULL;
 
 static std::vector<LyricLine> g_lines;
@@ -131,14 +187,9 @@ static COLORREF g_cCur = RGB(255, 255, 255);
 static COLORREF g_cDim = RGB(150, 150, 168);
 
 static int  g_dpi      = 96;
-static int  g_titleH   = 30;
-static int  g_border   = 6;
-static bool g_hotClose = false;
-static bool g_tracking = false;
 
 static HFONT g_fontNormal = NULL;
 static HFONT g_fontBold   = NULL;
-static HFONT g_fontTitle  = NULL;
 static std::wstring g_iniPath;
 
 // ---------------------------------------------------------------------------
@@ -210,24 +261,12 @@ static void SaveSettings()
     PutIniColor(L"cor_atual",  g_cCur);
     PutIniColor(L"cor_outras", g_cDim);
 
-    if (g_hwnd && IsWindow(g_hwnd))
+    if (g_ews)
     {
-        RECT r;
-        if (IsIconic(g_hwnd) || IsZoomed(g_hwnd))
-        {
-            WINDOWPLACEMENT wp;
-            wp.length = sizeof(wp);
-            GetWindowPlacement(g_hwnd, &wp);
-            r = wp.rcNormalPosition;
-        }
-        else
-        {
-            GetWindowRect(g_hwnd, &r);
-        }
-        PutIniInt(L"x", r.left);
-        PutIniInt(L"y", r.top);
-        PutIniInt(L"w", r.right - r.left);
-        PutIniInt(L"h", r.bottom - r.top);
+        PutIniInt(L"x", g_ews->r.left);
+        PutIniInt(L"y", g_ews->r.top);
+        PutIniInt(L"w", g_ews->r.right - g_ews->r.left);
+        PutIniInt(L"h", g_ews->r.bottom - g_ews->r.top);
     }
 }
 
@@ -259,7 +298,6 @@ static void CreateFonts()
 {
     if (g_fontNormal) DeleteObject(g_fontNormal);
     if (g_fontBold)   DeleteObject(g_fontBold);
-    if (g_fontTitle)  DeleteObject(g_fontTitle);
 
     HDC dc = GetDC(NULL);
     g_dpi = GetDeviceCaps(dc, LOGPIXELSY);
@@ -269,10 +307,6 @@ static void CreateFonts()
     int h = -MulDiv(g_fontPt, g_dpi, 72);
     g_fontNormal = MakeFont(h, FW_NORMAL);
     g_fontBold   = MakeFont(h, FW_BOLD);
-    g_fontTitle  = MakeFont(-MulDiv(9, g_dpi, 72), FW_NORMAL);
-
-    g_titleH = MulDiv(30, g_dpi, 96);
-    g_border = std::max<int>(4, MulDiv(6, g_dpi, 96));
 
     g_layoutDirty = true;
     g_snap = true;
@@ -1160,18 +1194,10 @@ static COLORREF Mix(COLORREF a, COLORREF b, double t)
     return RGB(r, g, bl);
 }
 
-// clareia fundos escuros e escurece fundos claros
-static COLORREF Shade(COLORREF c, double t)
-{
-    int lum = ((int)GetRValue(c) + (int)GetGValue(c) + (int)GetBValue(c)) / 3;
-    return Mix(c, lum > 128 ? RGB(0, 0, 0) : RGB(255, 255, 255), t);
-}
-
-// altura da area de letras (janela menos a barra de titulo)
+// altura da area de letras (a barra de titulo e da moldura do WACUP)
 static int ContentH(int H)
 {
-    int hc = H - g_titleH;
-    return hc < 1 ? 1 : hc;
+    return H < 1 ? 1 : H;
 }
 
 static double ViewTop(int Hc)
@@ -1188,68 +1214,10 @@ static void DrawStatus(HDC dc, int W, int H)
     RECT r = { kMargin, 0, right, 0 };
     DrawTextW(dc, g_status.c_str(), -1, &r, DT_CALCRECT | DT_WORDBREAK | DT_CENTER | DT_NOPREFIX);
     int h = (int)r.bottom;
-    int area = H - g_titleH;
-    int top = g_titleH + (area - h) / 2;
-    if (top < g_titleH) top = g_titleH;
+    int top = (H - h) / 2;
+    if (top < 0) top = 0;
     RECT r2 = { kMargin, top, right, top + h };
     DrawTextW(dc, g_status.c_str(), -1, &r2, DT_WORDBREAK | DT_CENTER | DT_NOPREFIX);
-}
-
-static void DrawTitleBar(HDC dc, int W, int H)
-{
-    COLORREF barC  = Shade(g_cBg, 0.06);
-    COLORREF lineC = Shade(g_cBg, 0.18);
-
-    RECT bar = { 0, 0, W, g_titleH };
-    HBRUSH bb = CreateSolidBrush(barC);
-    FillRect(dc, &bar, bb);
-    DeleteObject(bb);
-
-    // botao fechar
-    int closeW = g_titleH * 3 / 2;
-    if (g_hotClose)
-    {
-        RECT cr = { W - closeW, 0, W, g_titleH };
-        HBRUSH rb = CreateSolidBrush(RGB(196, 43, 28));
-        FillRect(dc, &cr, rb);
-        DeleteObject(rb);
-    }
-    HPEN pen = CreatePen(PS_SOLID, 1, g_hotClose ? RGB(255, 255, 255) : g_cDim);
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    int cx = W - closeW / 2, cy = g_titleH / 2;
-    int s = std::max<int>(4, g_titleH / 6);
-    MoveToEx(dc, cx - s, cy - s, NULL); LineTo(dc, cx + s + 1, cy + s + 1);
-    MoveToEx(dc, cx - s, cy + s, NULL); LineTo(dc, cx + s + 1, cy - s - 1);
-    SelectObject(dc, oldPen);
-    DeleteObject(pen);
-
-    // textos: titulo a esquerda, origem da letra (".lrc"/"embutida") a direita
-    SelectObject(dc, g_fontTitle);
-    SetBkMode(dc, TRANSPARENT);
-    int pad = g_titleH / 3;
-    int right = W - closeW;
-
-    if (!g_source.empty())
-    {
-        RECT mr = { 0, 0, 0, 0 };
-        DrawTextW(dc, g_source.c_str(), -1, &mr, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
-        SetTextColor(dc, Mix(g_cDim, barC, 0.35));
-        RECT sr = { 0, 0, right - pad / 2, g_titleH };
-        DrawTextW(dc, g_source.c_str(), -1, &sr, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
-        right -= (int)(mr.right - mr.left) + pad;
-    }
-
-    SetTextColor(dc, g_cDim);
-    RECT tr = { pad, 0, std::max<int>(pad + 10, right - pad / 2), g_titleH };
-    DrawTextW(dc, g_title.c_str(), -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-
-    // linha sob a barra e borda de 1 px
-    HBRUSH lb = CreateSolidBrush(lineC);
-    RECT sep = { 1, g_titleH - 1, W - 1, g_titleH };
-    FillRect(dc, &sep, lb);
-    RECT all = { 0, 0, W, H };
-    FrameRect(dc, &all, lb);
-    DeleteObject(lb);
 }
 
 static void Paint(HDC hdcWin, int W, int H)
@@ -1272,13 +1240,13 @@ static void Paint(HDC hdcWin, int W, int H)
     {
         EnsureLayout(dc, W);
         double viewTop = ViewTop(ContentH(H));
-        IntersectClipRect(dc, 1, g_titleH, W - 1, H - 1);
+        IntersectClipRect(dc, 1, 0, W - 1, H - 1);
 
         for (size_t i = 0; i < g_lines.size(); i++)
         {
-            int top = g_titleH + (int)floor(g_top[i] - viewTop + 0.5);
+            int top = (int)floor(g_top[i] - viewTop + 0.5);
             int h   = g_hgt[i];
-            if (top + h < g_titleH) continue;
+            if (top + h < 0) continue;
             if (top > H) break;
 
             bool cur = (g_synced && (int)i == g_cur);
@@ -1307,7 +1275,6 @@ static void Paint(HDC hdcWin, int W, int H)
         SelectClipRgn(dc, NULL);
     }
 
-    DrawTitleBar(dc, W, H);
 
     BitBlt(hdcWin, 0, 0, W, H, dc, 0, 0, SRCCOPY);
     SelectObject(dc, oldBmp);
@@ -1317,19 +1284,13 @@ static void Paint(HDC hdcWin, int W, int H)
 
 static int LineAtY(int y)
 {
-    if (g_lines.empty() || g_top.size() != g_lines.size() || y < g_titleH) return -1;
+    if (g_lines.empty() || g_top.size() != g_lines.size() || y < 0) return -1;
     RECT rc;
     GetClientRect(g_hwnd, &rc);
-    double cy = (y - g_titleH) + ViewTop(ContentH((int)rc.bottom));
+    double cy = y + ViewTop(ContentH((int)rc.bottom));
     for (size_t i = 0; i < g_lines.size(); i++)
         if (cy >= g_top[i] && cy < g_top[i] + g_hgt[i]) return (int)i;
     return -1;
-}
-
-static bool InCloseBtn(int x, int y, int W)
-{
-    int closeW = g_titleH * 3 / 2;
-    return y >= 0 && y < g_titleH && x >= W - closeW && x < W;
 }
 
 // ---------------------------------------------------------------------------
@@ -1420,24 +1381,10 @@ static void OnTick()
 // ---------------------------------------------------------------------------
 static void ApplyTopmost()
 {
-    SetWindowPos(g_hwnd, g_topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-}
-
-// cantos arredondados no Windows 11 (ignorado nas versoes antigas)
-typedef long (WINAPI *PFN_DwmSetWindowAttribute)(HWND, DWORD, const void*, DWORD);
-
-static void ApplyDwmStyle(HWND h)
-{
-    HMODULE m = LoadLibraryW(L"dwmapi.dll");
-    if (!m) return;
-    PFN_DwmSetWindowAttribute fn = (PFN_DwmSetWindowAttribute)GetProcAddress(m, "DwmSetWindowAttribute");
-    if (fn)
-    {
-        int round = 2;                       // DWMWCP_ROUND
-        fn(h, 33, &round, sizeof(round));    // DWMWA_WINDOW_CORNER_PREFERENCE
-    }
-    FreeLibrary(m);
+    HWND target = g_embedFrame ? g_embedFrame : g_hwnd;
+    if (target && IsWindow(target))
+        SetWindowPos(target, g_topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 static void ShowContextMenu(HWND h, int sx, int sy)
@@ -1484,6 +1431,126 @@ static void ShowContextMenu(HWND h, int sx, int sy)
     InvalidateRect(h, NULL, FALSE);
 }
 
+static void UpdateMainMenuCheck(bool visible)
+{
+    if (!g_hwndWA || !IsWindow(g_hwndWA) || !g_menuAdded) return;
+    HMENU menu = (HMENU)SendMessage(g_hwndWA, WM_WA_IPC, 0, IPC_GET_HMENU);
+    if (!menu) return;
+    MENUITEMINFOW mii;
+    ZeroMemory(&mii, sizeof(mii));
+    mii.cbSize = sizeof(mii);
+    mii.fMask = MIIM_STATE;
+    mii.fState = visible ? MFS_CHECKED : MFS_UNCHECKED;
+    SetMenuItemInfoW(menu, ID_GENLRC_MENU, FALSE, &mii);
+}
+
+static void AddMainMenuItem()
+{
+    // O menu de janelas do skin classico e o mesmo mecanismo usado pelo Thinger.
+    if (!g_hwndWA || SendMessage(g_hwndWA, WM_WA_IPC, 0, IPC_GETSKININFO) != 1) return;
+    HMENU menu = (HMENU)SendMessage(g_hwndWA, WM_WA_IPC, 0, IPC_GET_HMENU);
+    if (!menu) return;
+
+    int count = GetMenuItemCount(menu);
+    for (int i = count - 1; i >= 0; --i)
+    {
+        if (GetMenuItemID(menu, i) == ID_MAINWINDOW_MENU)
+        {
+            int pos = i + 1;
+            while (pos < GetMenuItemCount(menu) && GetMenuItemID(menu, pos) != 0xFFFFFFFF)
+            {
+                if (GetMenuItemID(menu, pos) == ID_GENLRC_MENU) return;
+                ++pos;
+            }
+            if (pos < GetMenuItemCount(menu))
+            {
+                if (InsertMenuW(menu, pos, MF_BYPOSITION | MF_STRING, ID_GENLRC_MENU, L"Gen LRC Lyrics"))
+                {
+                    g_menuAdded = true;
+                    SendMessage(g_hwndWA, WM_WA_IPC, 1, IPC_ADJUST_OPTIONSMENUPOS);
+                    UpdateMainMenuCheck(g_visible);
+                }
+            }
+            return;
+        }
+    }
+}
+
+static void RemoveMainMenuItem()
+{
+    if (!g_hwndWA || !IsWindow(g_hwndWA)) return;
+    HMENU menu = (HMENU)SendMessage(g_hwndWA, WM_WA_IPC, 0, IPC_GET_HMENU);
+    if (menu && g_menuAdded) RemoveMenu(menu, ID_GENLRC_MENU, MF_BYCOMMAND);
+    g_menuAdded = false;
+}
+
+static void ShowEmbedFrameAfterStartup()
+{
+    if (!g_embedFrame || !IsWindow(g_embedFrame)) return;
+    ShowWindow(g_embedFrame, SW_SHOW);
+}
+
+static void StartupShowTick()
+{
+    if (!g_startupPending)
+    {
+        if (g_hwnd) KillTimer(g_hwnd, kStartupTimerId);
+        return;
+    }
+
+    DWORD now = GetTickCount();
+    if (!g_mainSeen && g_hwndWA && IsWindow(g_hwndWA) && IsWindowVisible(g_hwndWA))
+    {
+        g_mainSeen = true;
+        g_mainSeenT0 = now;
+    }
+
+    bool ready = (g_mainSeen && (DWORD)(now - g_mainSeenT0) >= kStartupAfterMainMs) ||
+                 ((DWORD)(now - g_startupT0) >= kStartupMaxMs);
+    if (!ready) return;
+
+    g_startupPending = false;
+    if (g_hwnd) KillTimer(g_hwnd, kStartupTimerId);
+    if (g_visible) ShowEmbedFrameAfterStartup();
+}
+
+static LRESULT CALLBACK MainWindowProc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    if (m == WM_COMMAND && HIWORD(w) == 0 && LOWORD(w) == ID_GENLRC_MENU)
+    {
+        g_startupPending = false;
+        g_visible = !g_visible;
+        if (g_embedFrame && IsWindow(g_embedFrame)) ShowWindow(g_embedFrame, g_visible ? SW_SHOW : SW_HIDE);
+        UpdateMainMenuCheck(g_visible);
+        SaveSettings();
+        return 0;
+    }
+    return CallWindowProc(g_oldMainProc, h, m, w, l);
+}
+
+static LRESULT CALLBACK EmbedFrameProc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    if (m == WM_CLOSE)
+    {
+        ShowWindow(h, SW_HIDE);
+        g_visible = false;
+        UpdateMainMenuCheck(false);
+        SaveSettings();
+        return 0;
+    }
+    if (m == WM_SHOWWINDOW)
+    {
+        LRESULT result = CallWindowProc(g_oldEmbedProc, h, m, w, l);
+        if (!g_startupPending)
+        {
+            g_visible = (w != FALSE);
+            UpdateMainMenuCheck(g_visible);
+        }
+        return result;
+    }
+    return CallWindowProc(g_oldEmbedProc, h, m, w, l);
+}
+
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     switch (m)
@@ -1494,35 +1561,16 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
 
     case WM_TIMER:
         if (w == 1) OnTick();
+        else if (w == kStartupTimerId) StartupShowTick();
         return 0;
 
     case WM_ERASEBKGND:
         return 1;
 
-    case WM_NCCALCSIZE:
-        if (w) return 0;               // sem moldura: a area cliente e a janela inteira
-        break;
-
     case WM_NCHITTEST:
-    {
-        RECT rc;
-        GetWindowRect(h, &rc);
-        int x = GET_X_LPARAM(l) - (int)rc.left;
-        int y = GET_Y_LPARAM(l) - (int)rc.top;
-        int W = (int)(rc.right - rc.left), H = (int)(rc.bottom - rc.top);
-        int b = g_border;
-        bool L = x < b, R = x >= W - b, T = y < b, B = y >= H - b;
-        if (T && L) return HTTOPLEFT;
-        if (T && R) return HTTOPRIGHT;
-        if (B && L) return HTBOTTOMLEFT;
-        if (B && R) return HTBOTTOMRIGHT;
-        if (L) return HTLEFT;
-        if (R) return HTRIGHT;
-        if (T) return HTTOP;
-        if (B) return HTBOTTOM;
-        if (y < g_titleH) return InCloseBtn(x, y, W) ? HTCLIENT : HTCAPTION;
+        // A janela filha nao controla arraste nem redimensionamento. Isso fica
+        // por conta da moldura nativa criada pelo WACUP.
         return HTCLIENT;
-    }
 
     case WM_NCLBUTTONDBLCLK:
         if (w == HTCAPTION) return 0;  // nao maximiza com duplo clique na barra
@@ -1561,39 +1609,6 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
         InvalidateRect(h, NULL, FALSE);
         return 0;
 
-    case WM_MOUSEMOVE:
-    {
-        RECT rc;
-        GetClientRect(h, &rc);
-        bool hot = InCloseBtn(GET_X_LPARAM(l), GET_Y_LPARAM(l), (int)rc.right);
-        if (!g_tracking)
-        {
-            TRACKMOUSEEVENT t;
-            t.cbSize = sizeof(t);
-            t.dwFlags = TME_LEAVE;
-            t.hwndTrack = h;
-            t.dwHoverTime = 0;
-            TrackMouseEvent(&t);
-            g_tracking = true;
-        }
-        if (hot != g_hotClose) { g_hotClose = hot; InvalidateRect(h, NULL, FALSE); }
-        return 0;
-    }
-
-    case WM_MOUSELEAVE:
-        g_tracking = false;
-        if (g_hotClose) { g_hotClose = false; InvalidateRect(h, NULL, FALSE); }
-        return 0;
-
-    case WM_LBUTTONUP:
-    {
-        RECT rc;
-        GetClientRect(h, &rc);
-        if (InCloseBtn(GET_X_LPARAM(l), GET_Y_LPARAM(l), (int)rc.right))
-            PostMessage(h, WM_CLOSE, 0, 0);
-        return 0;
-    }
-
     case WM_MOUSEWHEEL:
         if (!g_synced && !g_lines.empty())
         {
@@ -1630,8 +1645,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
     }
 
     case WM_CLOSE:
-        ShowWindow(h, SW_HIDE);        // so esconde; reabra em Preferencias > Plugins > Configurar
+        if (g_embedFrame) ShowWindow(g_embedFrame, SW_HIDE);
+        else ShowWindow(h, SW_HIDE);
         g_visible = false;
+        UpdateMainMenuCheck(false);
         SaveSettings();
         return 0;
 
@@ -1649,7 +1666,7 @@ static int  PluginInit();
 static void PluginConfig();
 static void PluginQuit();
 
-static char g_desc[] = "Letras LRC (sincronizadas) v1.1";
+static char g_desc[] = "Gen LRC Lyrics v1.1.0";
 
 static winampGeneralPurposePlugin g_plugin =
 {
@@ -1664,7 +1681,6 @@ static int PluginInit()
     InitIniPath();
     LoadSettings();
     CreateFonts();
-
     WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize        = sizeof(wc);
@@ -1683,52 +1699,134 @@ static int PluginInit()
     int y = GetIniInt(L"y", 0x7FFFFFFF);
     int w = GetIniInt(L"w", 420);
     int hh = GetIniInt(L"h", 600);
-    if (w < 200 || hh < 150) { w = 420; hh = 600; }
+    // Tamanho salvo: so volta ao padrao se for invalido. Janelas pequenas sao
+    // respeitadas (apenas um minimo de seguranca).
+    if (w <= 0 || hh <= 0 || w > 10000 || hh > 10000) { w = 420; hh = 600; }
+    if (w < 100)  w = 100;
+    if (hh < 80)  hh = 80;
 
-    bool okPos = (x != 0x7FFFFFFF && y != 0x7FFFFFFF);
-    if (okPos)
+    RECT parentRect;
+    GetWindowRect(g_hwndWA, &parentRect);
+    if (x == 0x7FFFFFFF || y == 0x7FFFFFFF)
     {
-        int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-        okPos = (x + w > vx + 60 && x < vx + vw - 60 && y + hh > vy + 60 && y < vy + vh - 60);
+        x = parentRect.left;
+        y = parentRect.bottom;
     }
-    if (!okPos) { x = CW_USEDEFAULT; y = CW_USEDEFAULT; }
+    {
+        // se a posicao salva ficou fora de todos os monitores (ex.: monitor
+        // removido), volta para perto da janela principal
+        RECT want = { x, y, x + w, y + hh };
+        if (!MonitorFromRect(&want, MONITOR_DEFAULTTONULL))
+        {
+            x = parentRect.left;
+            y = parentRect.bottom;
+        }
+    }
 
-    // janela "dona" = janela do WACUP: fica sempre acima dela e some da barra de tarefas
-    g_hwnd = CreateWindowExW(0, kClassName, L"Letras LRC",
-                             WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN,
-                             x, y, w, hh, g_hwndWA, NULL, g_hInst, NULL);
-    if (!g_hwnd) return 1;
+    g_ews = (embedWindowState*)GlobalAlloc(GPTR, sizeof(embedWindowState));
+    if (!g_ews) return 1;
+    g_ews->flags = 0;
+    // posicao inicial pedida ao WACUP (coordenadas de tela)
+    g_ews->r.left = x; g_ews->r.top = y; g_ews->r.right = x + w; g_ews->r.bottom = y + hh;
 
-    ApplyDwmStyle(g_hwnd);
+    // Jeito do SDK: cria a janela de letras primeiro e a entrega em g_ews->me.
+    // O WACUP a coloca dentro da moldura, respeitando a borda da skin, e a
+    // redimensiona sozinho.
+    g_hwnd = CreateWindowExW(0, kClassName, L"", WS_CHILD | WS_CLIPCHILDREN,
+                             0, 0, w, hh, g_hwndWA, NULL, g_hInst, NULL);
+    if (!g_hwnd)
+    {
+        GlobalFree((HGLOBAL)g_ews); g_ews = NULL;
+        UnregisterClassW(kClassName, g_hInst);
+        return 1;
+    }
+    g_ews->me = g_hwnd;
+
+    embedWindow_t embedWindow = (embedWindow_t)SendMessage(g_hwndWA, WM_WA_IPC, 0, IPC_GET_EMBEDIF);
+    if (!embedWindow)
+    {
+        if (g_hwnd) { DestroyWindow(g_hwnd); g_hwnd = NULL; }
+        GlobalFree((HGLOBAL)g_ews); g_ews = NULL;
+        UnregisterClassW(kClassName, g_hInst);
+        return 1;
+    }
+
+    g_embedFrame = embedWindow(g_ews);
+    if (!g_embedFrame || !IsWindow(g_embedFrame))
+    {
+        if (g_hwnd) { DestroyWindow(g_hwnd); g_hwnd = NULL; }
+        GlobalFree((HGLOBAL)g_ews); g_ews = NULL; g_embedFrame = NULL;
+        UnregisterClassW(kClassName, g_hInst);
+        return 1;
+    }
+
+    // A moldura nao pode ficar visivel durante a inicializacao do WACUP.
+    ShowWindow(g_embedFrame, SW_HIDE);
+    SetWindowTextW(g_embedFrame, L"Gen LRC Lyrics");
+    if (!IsChild(g_embedFrame, g_hwnd))
+        SetParent(g_hwnd, g_embedFrame);   // o WACUP reparenta mais tarde; o layout e dele
+    ShowWindow(g_hwnd, SW_SHOW);   // a filha so aparece quando a moldura for mostrada
+
+    // A moldura e a janela filha ja existem. Agora aplicamos a geometria
+    // salva, como no fluxo de inicializacao do Thinger.
+    g_ews->r.left = x;
+    g_ews->r.top = y;
+    g_ews->r.right = x + w;
+    g_ews->r.bottom = y + hh;
+
+    // Reposiciona explicitamente a moldura (ainda escondida) com a geometria salva.
+    SetWindowPos(g_embedFrame, NULL, x, y, w, hh,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+
+    g_oldEmbedProc = (WNDPROC)SetWindowLongPtrW(g_embedFrame, GWLP_WNDPROC, (LONG_PTR)EmbedFrameProc);
+
     ApplyTopmost();
-    if (g_visible) ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
+    // Nunca mostrar aqui. A janela aparece em StartupShowTick(), depois que o
+    // WACUP terminou de iniciar.
+    ShowWindow(g_embedFrame, SW_HIDE);
+    g_startupPending = g_visible;
+    g_mainSeen = false;
+    g_startupT0 = GetTickCount();
+    if (g_startupPending) SetTimer(g_hwnd, kStartupTimerId, kStartupPollMs, NULL);
+
+    AddMainMenuItem();
+    if (g_menuAdded)
+        g_oldMainProc = (WNDPROC)SetWindowLongPtrW(g_hwndWA, GWLP_WNDPROC, (LONG_PTR)MainWindowProc);
     return 0;
 }
 
 static void PluginConfig()
 {
-    if (!g_hwnd) return;
+    if (!g_embedFrame) return;
+    g_startupPending = false;
     g_visible = true;
-    ShowWindow(g_hwnd, IsIconic(g_hwnd) ? SW_RESTORE : SW_SHOW);
-    SetForegroundWindow(g_hwnd);
-    InvalidateRect(g_hwnd, NULL, FALSE);
+    ShowWindow(g_embedFrame, SW_SHOW);
+    SetForegroundWindow(g_embedFrame);
+    if (g_hwnd) InvalidateRect(g_hwnd, NULL, FALSE);
 }
 
 static void PluginQuit()
 {
-    if (g_hwnd)
-    {
-        SaveSettings();
-        if (IsWindow(g_hwnd)) DestroyWindow(g_hwnd);
-        g_hwnd = NULL;
-    }
+    g_startupPending = false;
+    SaveSettings();
+    if (g_oldMainProc && g_hwndWA && IsWindow(g_hwndWA))
+        SetWindowLongPtrW(g_hwndWA, GWLP_WNDPROC, (LONG_PTR)g_oldMainProc);
+    g_oldMainProc = NULL;
+    RemoveMainMenuItem();
+    if (g_embedFrame && IsWindow(g_embedFrame) && g_oldEmbedProc)
+        SetWindowLongPtrW(g_embedFrame, GWLP_WNDPROC, (LONG_PTR)g_oldEmbedProc);
+    g_oldEmbedProc = NULL;
+
+    if (g_hwnd && IsWindow(g_hwnd)) DestroyWindow(g_hwnd);
+    g_hwnd = NULL;
+    if (g_embedFrame && IsWindow(g_embedFrame)) DestroyWindow(g_embedFrame);
+    g_embedFrame = NULL;
+    if (g_ews) GlobalFree((HGLOBAL)g_ews);
+    g_ews = NULL;
+
     UnregisterClassW(kClassName, g_hInst);
     if (g_fontNormal) { DeleteObject(g_fontNormal); g_fontNormal = NULL; }
     if (g_fontBold)   { DeleteObject(g_fontBold);   g_fontBold   = NULL; }
-    if (g_fontTitle)  { DeleteObject(g_fontTitle);  g_fontTitle  = NULL; }
 }
 
 extern "C" __declspec(dllexport) winampGeneralPurposePlugin* winampGetGeneralPurposePlugin()
