@@ -1,4 +1,4 @@
-// gen_lrclyrics.cpp  (v1.1.0)
+// gen_lrclyrics.cpp  (v1.2.0)
 // Plugin geral (gen_*.dll) para WACUP / Winamp 5.x - 32 bits (x86)
 //
 // A janela de letras e integrada ao sistema de janelas do WACUP via
@@ -33,6 +33,8 @@
 
 #include <windows.h>
 #include <windowsx.h>
+#include <commdlg.h>
+#include <commctrl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -177,6 +179,9 @@ static int  g_lineH    = 20;
 static bool g_layoutDirty = true;
 
 static int  g_fontPt         = 16;
+static std::wstring g_fontFace = L"Segoe UI";
+static int g_lineSpacing = 50; // percentual da altura da linha
+static int g_alignment = 1;    // 0 esquerda, 1 centro, 2 direita
 static bool g_topmost        = false;
 static bool g_preferEmbedded = false;
 static int  g_userOffset     = 0;      // ms; positivo = letra aparece mais cedo
@@ -252,6 +257,9 @@ static void InitIniPath()
 
 static void SaveSettings()
 {
+    WritePrivateProfileStringW(L"lyrics", L"fontface", g_fontFace.c_str(), g_iniPath.c_str());
+    PutIniInt(L"line_spacing", g_lineSpacing);
+    PutIniInt(L"alignment", g_alignment);
     PutIniInt(L"fontsize",        g_fontPt);
     PutIniInt(L"topmost",         g_topmost ? 1 : 0);
     PutIniInt(L"prefer_embedded", g_preferEmbedded ? 1 : 0);
@@ -272,6 +280,14 @@ static void SaveSettings()
 
 static void LoadSettings()
 {
+    wchar_t face[LF_FACESIZE] = L"Segoe UI";
+    GetPrivateProfileStringW(L"lyrics", L"fontface", L"Segoe UI", face, LF_FACESIZE, g_iniPath.c_str());
+    g_fontFace = face;
+    g_lineSpacing = GetIniInt(L"line_spacing", 50);
+    if (g_lineSpacing < 0) g_lineSpacing = 0;
+    if (g_lineSpacing > 200) g_lineSpacing = 200;
+    g_alignment = GetIniInt(L"alignment", 1);
+    if (g_alignment < 0 || g_alignment > 2) g_alignment = 1;
     g_fontPt = GetIniInt(L"fontsize", 16);
     if (g_fontPt < 8)  g_fontPt = 8;
     if (g_fontPt > 60) g_fontPt = 60;
@@ -291,7 +307,7 @@ static HFONT MakeFont(int height, int weight)
 {
     return CreateFontW(height, 0, 0, 0, weight, FALSE, FALSE, FALSE,
                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                       CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                       CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, g_fontFace.c_str());
 }
 
 static void CreateFonts()
@@ -1158,7 +1174,7 @@ static void EnsureLayout(HDC dc, int W)
     TEXTMETRICW tm;
     GetTextMetricsW(dc, &tm);
     g_lineH = (int)tm.tmHeight;
-    int gap = g_lineH / 2;
+    int gap = MulDiv(g_lineH, g_lineSpacing, 100);
     int availW = std::max<int>(40, W - 2 * kMargin);
 
     int y = 0;
@@ -1166,7 +1182,7 @@ static void EnsureLayout(HDC dc, int W)
     {
         const std::wstring& t = LineText(i);
         RECT r = { 0, 0, availW, 0 };
-        DrawTextW(dc, t.c_str(), (int)t.size(), &r, DT_CALCRECT | DT_WORDBREAK | DT_CENTER | DT_NOPREFIX);
+        DrawTextW(dc, t.c_str(), (int)t.size(), &r, DT_CALCRECT | DT_WORDBREAK | (g_alignment == 0 ? DT_LEFT : (g_alignment == 2 ? DT_RIGHT : DT_CENTER)) | DT_NOPREFIX);
         int h = std::max<int>((int)r.bottom, g_lineH);
         g_top[i] = y;
         g_hgt[i] = h;
@@ -1270,7 +1286,7 @@ static void Paint(HDC hdcWin, int W, int H)
             SetTextColor(dc, col);
             RECT r = { kMargin, top, W - kMargin, top + h };
             const std::wstring& t = LineText(i);
-            DrawTextW(dc, t.c_str(), (int)t.size(), &r, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
+            DrawTextW(dc, t.c_str(), (int)t.size(), &r, (g_alignment == 0 ? DT_LEFT : (g_alignment == 2 ? DT_RIGHT : DT_CENTER)) | DT_WORDBREAK | DT_NOPREFIX);
         }
         SelectClipRgn(dc, NULL);
     }
@@ -1660,13 +1676,465 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
 }
 
 // ---------------------------------------------------------------------------
+// Preferencias visuais (abertas pelo botao Configurar do WACUP)
+// ---------------------------------------------------------------------------
+enum { CFG_FONT=5001, CFG_SIZE, CFG_BG, CFG_CUR, CFG_DIM, CFG_SPACING, CFG_ALIGN, CFG_RESET, CFG_SIZE_VALUE, CFG_SPACING_VALUE, CFG_TAB };
+struct VisualPrefs { std::wstring face; int size, spacing, align; COLORREF bg, cur, dim; };
+static VisualPrefs g_pending;
+static HWND g_configDlg = NULL;
+static HWND g_cfgTab    = NULL;
+static HWND g_cfgPage[2] = { NULL, NULL };
+
+// A janela de configuracoes e um dialogo Win32 comum (modal, com a barra de
+// titulo do Windows e abas), como as janelas de configuracao dos plugins do
+// WACUP. GENLRC_OWN_DARKMODE liga um modo escuro proprio (somente quando o
+// Windows esta em modo escuro). Se o WACUP ja deixar o dialogo escuro sozinho
+// e o resultado ficar estranho, mude para 0.
+#ifndef GENLRC_OWN_DARKMODE
+#define GENLRC_OWN_DARKMODE 1
+#endif
+#ifdef _MSC_VER
+#pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "advapi32.lib")
+#endif
+
+static bool   g_cfgDark      = false;
+static HBRUSH g_cfgBrushBg   = NULL;
+static HBRUSH g_cfgBrushEdit = NULL;
+static const COLORREF kCfgDarkBg   = RGB(32, 32, 32);
+static const COLORREF kCfgDarkEdit = RGB(51, 51, 51);
+static const COLORREF kCfgDarkLine = RGB(110, 110, 110);
+static const COLORREF kCfgDarkText = RGB(255, 255, 255);
+
+static const int kCfgClientW = 440, kCfgClientH = 340;   // area cliente do dialogo (96 dpi)
+static const int kCfgTabX = 10, kCfgTabY = 10, kCfgTabW = 420, kCfgTabH = 282;
+static const wchar_t* const kCfgTabNames[2] = { L"Fonte", L"Layout" };
+
+// molduras com titulo (como os grupos do dialogo do MPEG), desenhadas pela pagina
+struct CfgGroup { int page; const wchar_t* title; int x1, y1, x2, y2; };
+static const CfgGroup kCfgGroups[] = {
+    { 0, L"Tipo de letra",              8,   6, 396,  72 },
+    { 0, L"Tamanho",                    8,  82, 396, 148 },
+    { 1, L"Cores",                      8,   6, 396, 126 },
+    { 1, L"Espaçamento e alinhamento",  8, 136, 396, 218 },
+};
+
+typedef HRESULT (WINAPI *PFN_CfgSetWindowTheme)(HWND, LPCWSTR, LPCWSTR);
+typedef HRESULT (WINAPI *PFN_CfgDwmSetAttr)(HWND, DWORD, LPCVOID, DWORD);
+typedef HRESULT (WINAPI *PFN_CfgEnableTex)(HWND, DWORD);
+
+static int CS(int v) { return MulDiv(v, g_dpi > 0 ? g_dpi : 96, 96); }
+
+static HWND CfgItem(int id) {
+    HWND h = NULL;
+    for (int i = 0; i < 2 && !h; i++)
+        if (g_cfgPage[i]) h = GetDlgItem(g_cfgPage[i], id);
+    if (!h && g_configDlg) h = GetDlgItem(g_configDlg, id);
+    return h;
+}
+static void SetControlText(int id, const wchar_t* value) {
+    HWND h = CfgItem(id);
+    if (h) SetWindowTextW(h, value);
+}
+
+// ---- modo escuro ------------------------------------------------------------
+static bool IsOsDarkMode() {
+    HKEY k; DWORD v = 1, sz = sizeof(v), type = 0;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                      0, KEY_QUERY_VALUE, &k) != ERROR_SUCCESS) return false;
+    LONG r = RegQueryValueExW(k, L"AppsUseLightTheme", NULL, &type, (LPBYTE)&v, &sz);
+    RegCloseKey(k);
+    return r == ERROR_SUCCESS && type == REG_DWORD && v == 0;
+}
+static void InitConfigDarkState() {
+    g_cfgDark = false;
+#if GENLRC_OWN_DARKMODE
+    if (IsOsDarkMode()) {
+        g_cfgDark = true;
+        if (!g_cfgBrushBg)   g_cfgBrushBg   = CreateSolidBrush(kCfgDarkBg);
+        if (!g_cfgBrushEdit) g_cfgBrushEdit = CreateSolidBrush(kCfgDarkEdit);
+    }
+#endif
+}
+static bool CfgCtlColor(UINT msg, WPARAM wp, INT_PTR* out) {
+    if (!g_cfgDark) return false;
+    HDC dc = (HDC)wp;
+    if (msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORLISTBOX) {
+        SetTextColor(dc, kCfgDarkText); SetBkColor(dc, kCfgDarkEdit);
+        *out = (INT_PTR)g_cfgBrushEdit; return true;
+    }
+    SetTextColor(dc, kCfgDarkText); SetBkColor(dc, kCfgDarkBg);
+    *out = (INT_PTR)g_cfgBrushBg; return true;
+}
+static BOOL CALLBACK DarkThemeChild(HWND c, LPARAM lp) {
+    PFN_CfgSetWindowTheme fn = (PFN_CfgSetWindowTheme)lp;
+    wchar_t cls[48]; cls[0] = 0; GetClassNameW(c, cls, 48);
+    if (!_wcsicmp(cls, L"ComboBox")) fn(c, L"DarkMode_CFD", NULL);
+    else if (!_wcsicmp(cls, L"Button") || !_wcsicmp(cls, L"msctls_trackbar32")) fn(c, L"DarkMode_Explorer", NULL);
+    return TRUE;
+}
+// a aba nativa nao fica escura de verdade, entao no modo escuro ela e desenhada aqui
+static LRESULT CALLBACK DarkTabProc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    if (m == WM_ERASEBKGND) return 1;
+    if (m == WM_PAINT) {
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT rc; GetClientRect(h, &rc);
+        FillRect(dc, &rc, g_cfgBrushBg);
+        int n = (int)SendMessageW(h, TCM_GETITEMCOUNT, 0, 0);
+        int sel = (int)SendMessageW(h, TCM_GETCURSEL, 0, 0);
+        RECT first = { 0, 0, 0, 0 };
+        if (n > 0) SendMessageW(h, TCM_GETITEMRECT, 0, (LPARAM)&first);
+        int top = first.bottom;
+        HPEN pen = CreatePen(PS_SOLID, 1, kCfgDarkLine);
+        HPEN bgPen = CreatePen(PS_SOLID, 1, kCfgDarkBg);
+        HGDIOBJ oldPen = SelectObject(dc, pen);
+        // moldura do painel
+        MoveToEx(dc, rc.left, top, NULL);
+        LineTo(dc, rc.right - 1, top);
+        LineTo(dc, rc.right - 1, rc.bottom - 1);
+        LineTo(dc, rc.left, rc.bottom - 1);
+        LineTo(dc, rc.left, top);
+        HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+        HGDIOBJ oldFont = f ? SelectObject(dc, f) : NULL;
+        SetBkMode(dc, TRANSPARENT);
+        for (int i = 0; i < n; i++) {
+            RECT r; SendMessageW(h, TCM_GETITEMRECT, i, (LPARAM)&r);
+            bool isSel = (i == sel);
+            RECT fill = r; fill.left++; fill.top++;
+            FillRect(dc, &fill, isSel ? g_cfgBrushBg : g_cfgBrushEdit);
+            SelectObject(dc, pen);
+            MoveToEx(dc, r.left, r.bottom, NULL);
+            LineTo(dc, r.left, r.top);
+            LineTo(dc, r.right - 1, r.top);
+            LineTo(dc, r.right - 1, r.bottom);
+            if (isSel) {                       // abre a moldura sob a aba ativa
+                SelectObject(dc, bgPen);
+                MoveToEx(dc, r.left + 1, top, NULL);
+                LineTo(dc, r.right - 1, top);
+            }
+            RECT tr = r; if (!isSel) tr.top += 2;
+            SetTextColor(dc, isSel ? kCfgDarkText : RGB(200, 200, 200));
+            DrawTextW(dc, kCfgTabNames[i < 2 ? i : 0], -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+        if (oldFont) SelectObject(dc, oldFont);
+        SelectObject(dc, oldPen);
+        DeleteObject(pen); DeleteObject(bgPen);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    return DefSubclassProc(h, m, wp, lp);
+}
+static void ApplyConfigDarkMode(HWND dlg) {
+    if (!g_cfgDark) return;
+    HMODULE dwm = LoadLibraryW(L"dwmapi.dll");          // barra de titulo escura
+    if (dwm) {
+        PFN_CfgDwmSetAttr fn = (PFN_CfgDwmSetAttr)GetProcAddress(dwm, "DwmSetWindowAttribute");
+        if (fn) {
+            BOOL on = TRUE;
+            if (fn(dlg, 20, &on, sizeof(on)) != S_OK)   // DWMWA_USE_IMMERSIVE_DARK_MODE
+                fn(dlg, 19, &on, sizeof(on));           // valor antigo (Windows 10 1809/1903)
+        }
+        FreeLibrary(dwm);
+    }
+    HMODULE ux = LoadLibraryW(L"uxtheme.dll");          // botoes / combos / sliders escuros
+    if (ux) {
+        PFN_CfgSetWindowTheme fn = (PFN_CfgSetWindowTheme)GetProcAddress(ux, "SetWindowTheme");
+        if (fn) EnumChildWindows(dlg, DarkThemeChild, (LPARAM)fn);
+        FreeLibrary(ux);
+    }
+    if (g_cfgTab) SetWindowSubclass(g_cfgTab, DarkTabProc, 1, 0);
+}
+static void EnableLightPageTexture(HWND pg) {
+    HMODULE ux = LoadLibraryW(L"uxtheme.dll");
+    if (!ux) return;
+    PFN_CfgEnableTex fn = (PFN_CfgEnableTex)GetProcAddress(ux, "EnableThemeDialogTexture");
+    if (fn) fn(pg, 6);                                  // ETDT_ENABLETAB
+    FreeLibrary(ux);
+}
+
+// ---- controles --------------------------------------------------------------
+static void AddConfigLabel(HWND parent, const wchar_t* text, int x, int y, int w=150) {
+    CreateWindowExW(0, L"STATIC", text, WS_CHILD|WS_VISIBLE, CS(x),CS(y),CS(w),CS(22),parent,NULL,g_hInst,NULL);
+}
+static void AddConfigButton(HWND parent, const wchar_t* text, int id, int x, int y, int w=110) {
+    CreateWindowExW(0,L"BUTTON",text,WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,CS(x),CS(y),CS(w),CS(25),parent,(HMENU)(INT_PTR)id,g_hInst,NULL);
+}
+static void AddConfigSlider(HWND parent, int id, int value, int minValue, int maxValue, int x, int y, int width) {
+    HWND slider=CreateWindowExW(0,TRACKBAR_CLASSW,L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|TBS_AUTOTICKS,CS(x),CS(y),CS(width),CS(34),parent,(HMENU)(INT_PTR)id,g_hInst,NULL);
+    SendMessageW(slider,TBM_SETRANGE,TRUE,MAKELONG(minValue,maxValue));
+    SendMessageW(slider,TBM_SETPAGESIZE,0,(LPARAM)5);
+    SendMessageW(slider,TBM_SETPOS,TRUE,(LPARAM)value);
+}
+static void AddConfigValue(HWND parent, int id, int x, int y, int w) {
+    CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_VISIBLE|SS_RIGHT,CS(x),CS(y),CS(w),CS(20),parent,(HMENU)(INT_PTR)id,g_hInst,NULL);
+}
+static void RefreshSliderLabels() {
+    wchar_t n[32];
+    HWND sz=CfgItem(CFG_SIZE), sp=CfgItem(CFG_SPACING);
+    if (sz) { int v=(int)SendMessageW(sz,TBM_GETPOS,0,0); _snwprintf(n,32,L"%d pt",v); n[31]=0; SetControlText(CFG_SIZE_VALUE,n); }
+    if (sp) { int v=(int)SendMessageW(sp,TBM_GETPOS,0,0); _snwprintf(n,32,L"%d%%",v); n[31]=0; SetControlText(CFG_SPACING_VALUE,n); }
+}
+static int CALLBACK EnumConfigFonts(const LOGFONTW* lf, const TEXTMETRICW*, DWORD, LPARAM param) {
+    HWND combo=(HWND)param;
+    if (lf->lfFaceName[0]) SendMessageW(combo,CB_ADDSTRING,0,(LPARAM)lf->lfFaceName);
+    return 1;
+}
+static void ChooseConfigColor(HWND wnd, int id, COLORREF* color) {
+    static COLORREF custom[16]={};
+    CHOOSECOLORW cc; ZeroMemory(&cc,sizeof(cc));
+    cc.lStructSize=sizeof(cc); cc.hwndOwner=wnd; cc.rgbResult=*color;
+    cc.lpCustColors=custom; cc.Flags=CC_FULLOPEN|CC_RGBINIT;
+    if (ChooseColorW(&cc)) *color=cc.rgbResult;
+    wchar_t label[64]; _snwprintf(label,64,L"Selecionar cor...  #%02X%02X%02X",GetRValue(*color),GetGValue(*color),GetBValue(*color)); label[63]=0;
+    SetControlText(id,label);
+}
+static void RefreshColorLabels() {
+    wchar_t b[64];
+    _snwprintf(b,64,L"Fundo  #%02X%02X%02X",GetRValue(g_pending.bg),GetGValue(g_pending.bg),GetBValue(g_pending.bg)); b[63]=0; SetControlText(CFG_BG,b);
+    _snwprintf(b,64,L"Linha atual  #%02X%02X%02X",GetRValue(g_pending.cur),GetGValue(g_pending.cur),GetBValue(g_pending.cur)); b[63]=0; SetControlText(CFG_CUR,b);
+    _snwprintf(b,64,L"Outras linhas  #%02X%02X%02X",GetRValue(g_pending.dim),GetGValue(g_pending.dim),GetBValue(g_pending.dim)); b[63]=0; SetControlText(CFG_DIM,b);
+}
+static void ResetPendingPrefs() {
+    g_pending.face=L"Segoe UI"; g_pending.size=16; g_pending.spacing=50; g_pending.align=1;
+    g_pending.bg=RGB(16,16,22); g_pending.cur=RGB(255,255,255); g_pending.dim=RGB(150,150,168);
+    SendMessageW(CfgItem(CFG_FONT),CB_SELECTSTRING,(WPARAM)-1,(LPARAM)g_pending.face.c_str());
+    SendMessageW(CfgItem(CFG_SIZE),TBM_SETPOS,TRUE,(LPARAM)g_pending.size);
+    SendMessageW(CfgItem(CFG_SPACING),TBM_SETPOS,TRUE,(LPARAM)g_pending.spacing);
+    SendMessageW(CfgItem(CFG_ALIGN),CB_SETCURSEL,g_pending.align,0);
+    RefreshSliderLabels(); RefreshColorLabels();
+}
+static void ApplyVisualPrefs() {
+    wchar_t face[LF_FACESIZE]=L"Segoe UI";
+    GetWindowTextW(CfgItem(CFG_FONT),face,LF_FACESIZE);
+    if (!face[0]) wcscpy(face,L"Segoe UI");
+    int size=(int)SendMessageW(CfgItem(CFG_SIZE),TBM_GETPOS,0,0);
+    int spacing=(int)SendMessageW(CfgItem(CFG_SPACING),TBM_GETPOS,0,0);
+    int align=(int)SendMessageW(CfgItem(CFG_ALIGN),CB_GETCURSEL,0,0); if(align<0||align>2)align=1;
+    g_fontFace=face; g_fontPt=size; g_lineSpacing=spacing; g_alignment=align;
+    g_cBg=g_pending.bg; g_cCur=g_pending.cur; g_cDim=g_pending.dim;
+    CreateFonts(); g_layoutDirty=true; g_snap=true;
+    if(g_hwnd) InvalidateRect(g_hwnd,NULL,TRUE);
+    SaveSettings();
+}
+static BOOL CALLBACK SetConfigChildFont(HWND child, LPARAM font) { SendMessageW(child,WM_SETFONT,(WPARAM)font,TRUE); return TRUE; }
+
+// ---- paginas (dialogos filhos dentro das abas) ----------------------------------
+static void BuildFontPage(HWND pg) {
+    AddConfigLabel(pg,L"Fonte",20,34,60);
+    HWND font=CreateWindowExW(WS_EX_CLIENTEDGE,L"COMBOBOX",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|CBS_DROPDOWN|CBS_AUTOHSCROLL|WS_VSCROLL,CS(90),CS(30),CS(290),CS(220),pg,(HMENU)(INT_PTR)CFG_FONT,g_hInst,NULL);
+    LOGFONTW lf; ZeroMemory(&lf,sizeof(lf)); lf.lfCharSet=DEFAULT_CHARSET;
+    HDC dc=GetDC(pg); EnumFontFamiliesExW(dc,&lf,(FONTENUMPROCW)EnumConfigFonts,(LPARAM)font,0); ReleaseDC(pg,dc);
+    SendMessageW(font,CB_SELECTSTRING,(WPARAM)-1,(LPARAM)g_pending.face.c_str());
+    AddConfigLabel(pg,L"Tamanho da fonte",20,110,130);
+    AddConfigSlider(pg,CFG_SIZE,g_pending.size,8,60,150,102,190);
+    AddConfigValue(pg,CFG_SIZE_VALUE,345,110,40);
+}
+static void BuildLayoutPage(HWND pg) {
+    AddConfigButton(pg,L"",CFG_BG,20,26,364);
+    AddConfigButton(pg,L"",CFG_CUR,20,57,364);
+    AddConfigButton(pg,L"",CFG_DIM,20,88,364);
+    AddConfigLabel(pg,L"Espaçamento entre linhas",20,160,140);
+    AddConfigSlider(pg,CFG_SPACING,g_pending.spacing,0,200,160,152,180);
+    AddConfigValue(pg,CFG_SPACING_VALUE,345,160,40);
+    AddConfigLabel(pg,L"Alinhamento",20,192,120);
+    HWND a=CreateWindowExW(WS_EX_CLIENTEDGE,L"COMBOBOX",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|CBS_DROPDOWNLIST,CS(160),CS(188),CS(140),CS(90),pg,(HMENU)(INT_PTR)CFG_ALIGN,g_hInst,NULL);
+    SendMessageW(a,CB_ADDSTRING,0,(LPARAM)L"Esquerda"); SendMessageW(a,CB_ADDSTRING,0,(LPARAM)L"Centro"); SendMessageW(a,CB_ADDSTRING,0,(LPARAM)L"Direita"); SendMessageW(a,CB_SETCURSEL,g_pending.align,0);
+}
+static void DrawCfgGroups(HWND pg, HDC dc) {
+    int idx = (pg == g_cfgPage[1]) ? 1 : 0;
+    HFONT f=(HFONT)SendMessageW(pg,WM_GETFONT,0,0);
+    HGDIOBJ oldFont = f ? SelectObject(dc,f) : NULL;
+    COLORREF line = g_cfgDark ? kCfgDarkLine : GetSysColor(COLOR_3DSHADOW);
+    COLORREF txt  = g_cfgDark ? kCfgDarkText : GetSysColor(COLOR_WINDOWTEXT);
+    HPEN pen=CreatePen(PS_SOLID,1,line); HGDIOBJ oldPen=SelectObject(dc,pen);
+    SetBkMode(dc,TRANSPARENT); SetTextColor(dc,txt);
+    for (size_t i=0;i<sizeof(kCfgGroups)/sizeof(kCfgGroups[0]);i++) {
+        const CfgGroup& g=kCfgGroups[i];
+        if (g.page!=idx) continue;
+        int x1=CS(g.x1), y1=CS(g.y1), x2=CS(g.x2), y2=CS(g.y2);
+        int len=(int)wcslen(g.title);
+        SIZE sz; GetTextExtentPoint32W(dc,g.title,len,&sz);
+        int tx=x1+CS(10), ly=y1+sz.cy/2;
+        MoveToEx(dc,x1,ly,NULL); LineTo(dc,tx-CS(3),ly);               // topo (esquerda do titulo)
+        MoveToEx(dc,tx+sz.cx+CS(3),ly,NULL); LineTo(dc,x2,ly);         // topo (direita do titulo)
+        MoveToEx(dc,x1,ly,NULL); LineTo(dc,x1,y2);                     // esquerda
+        LineTo(dc,x2,y2);                                              // base
+        LineTo(dc,x2,ly-1);                                            // direita
+        TextOutW(dc,tx,y1,g.title,len);
+    }
+    SelectObject(dc,oldPen); DeleteObject(pen);
+    if (oldFont) SelectObject(dc,oldFont);
+}
+static bool HandleCfgCommand(HWND owner, int id) {
+    switch (id) {
+    case CFG_BG:  ChooseConfigColor(owner,CFG_BG,&g_pending.bg);   return true;
+    case CFG_CUR: ChooseConfigColor(owner,CFG_CUR,&g_pending.cur); return true;
+    case CFG_DIM: ChooseConfigColor(owner,CFG_DIM,&g_pending.dim); return true;
+    }
+    return false;
+}
+static INT_PTR CALLBACK ConfigPageProc(HWND pg, UINT msg, WPARAM wp, LPARAM lp) {
+    INT_PTR r;
+    switch (msg) {
+    case WM_INITDIALOG:
+        if ((int)lp == 0) { g_cfgPage[0]=pg; BuildFontPage(pg); }
+        else              { g_cfgPage[1]=pg; BuildLayoutPage(pg); }
+        if (!g_cfgDark) EnableLightPageTexture(pg);
+        return FALSE;
+    case WM_PAINT: {
+        PAINTSTRUCT ps; HDC dc=BeginPaint(pg,&ps);
+        DrawCfgGroups(pg,dc);
+        EndPaint(pg,&ps);
+        return TRUE;
+    }
+    case WM_HSCROLL:
+        RefreshSliderLabels(); return TRUE;
+    case WM_COMMAND:
+        if (HandleCfgCommand(pg,LOWORD(wp))) return TRUE;
+        if (LOWORD(wp)==IDOK || LOWORD(wp)==IDCANCEL) { SendMessageW(g_configDlg,WM_COMMAND,wp,lp); return TRUE; }
+        break;
+    case WM_CTLCOLORDLG: case WM_CTLCOLORSTATIC: case WM_CTLCOLORBTN:
+    case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX:
+        if (CfgCtlColor(msg,wp,&r)) return r;
+        break;
+    }
+    return FALSE;
+}
+
+// ---- dialogo principal ------------------------------------------------------
+static void MakeDlgTemplate(WORD* buf, size_t words, DWORD style, DWORD exStyle, const wchar_t* title) {
+    ZeroMemory(buf, words * sizeof(WORD));
+    WORD* p = buf;
+    *(DWORD*)p = style;   p += 2;
+    *(DWORD*)p = exStyle; p += 2;
+    *p++ = 0;                                   // numero de controles
+    *p++ = 0; *p++ = 0; *p++ = 200; *p++ = 150; // x y cx cy (ajustado depois)
+    *p++ = 0; *p++ = 0;                         // sem menu, classe padrao
+    while ((*p++ = (WORD)*title++)) {}
+    *p++ = 9;                                   // fonte 9 pt
+    const wchar_t* face = L"Segoe UI";
+    while ((*p++ = (WORD)*face++)) {}
+}
+static HWND CreateConfigPage(HWND dlg, int idx) {
+    __declspec(align(4)) WORD buf[96];
+    MakeDlgTemplate(buf, 96, DS_CONTROL|DS_SETFONT|WS_CHILD|WS_CLIPCHILDREN, WS_EX_CONTROLPARENT, L"");
+    return CreateDialogIndirectParamW(g_hInst,(LPCDLGTEMPLATEW)buf,dlg,ConfigPageProc,(LPARAM)idx);
+}
+static void BuildMainControls(HWND dlg) {
+    InitConfigDarkState();
+    HFONT f=(HFONT)SendMessageW(dlg,WM_GETFONT,0,0);
+    if(!f) f=(HFONT)GetStockObject(DEFAULT_GUI_FONT);
+
+    g_cfgTab=CreateWindowExW(0,WC_TABCONTROLW,L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_CLIPSIBLINGS|TCS_FOCUSNEVER,
+        CS(kCfgTabX),CS(kCfgTabY),CS(kCfgTabW),CS(kCfgTabH),dlg,(HMENU)(INT_PTR)CFG_TAB,g_hInst,NULL);
+    SendMessageW(g_cfgTab,WM_SETFONT,(WPARAM)f,TRUE);
+    for (int i=0;i<2;i++) {
+        TCITEMW ti; ZeroMemory(&ti,sizeof(ti));
+        ti.mask=TCIF_TEXT; ti.pszText=(LPWSTR)kCfgTabNames[i];
+        SendMessageW(g_cfgTab,TCM_INSERTITEMW,i,(LPARAM)&ti);
+    }
+    RECT dr={0,0,CS(kCfgTabW),CS(kCfgTabH)};
+    SendMessageW(g_cfgTab,TCM_ADJUSTRECT,FALSE,(LPARAM)&dr);   // area util da aba
+    OffsetRect(&dr,CS(kCfgTabX),CS(kCfgTabY));
+    for (int i=0;i<2;i++) {
+        HWND pg=CreateConfigPage(dlg,i);
+        if (!pg) continue;
+        SetWindowPos(pg,HWND_TOP,dr.left,dr.top,dr.right-dr.left,dr.bottom-dr.top,SWP_NOACTIVATE);
+        ShowWindow(pg, i==0 ? SW_SHOW : SW_HIDE);
+    }
+    // Redefinir a esquerda; Aplicar (OK) e Cancelar a direita, como nos dialogos do WACUP
+    AddConfigButton(dlg,L"Redefinir",CFG_RESET,10,302,100);
+    AddConfigButton(dlg,L"Aplicar",IDOK,232,302,95);
+    AddConfigButton(dlg,L"Cancelar",IDCANCEL,335,302,95);
+    EnumChildWindows(dlg,SetConfigChildFont,(LPARAM)f);   // inclui os controles das paginas
+    RefreshColorLabels();
+    RefreshSliderLabels();
+}
+
+static void SizeAndCenterConfigDialog(HWND dlg) {
+    RECT rc={0,0,CS(kCfgClientW),CS(kCfgClientH)};
+    AdjustWindowRectEx(&rc,(DWORD)GetWindowLongPtrW(dlg,GWL_STYLE),FALSE,(DWORD)GetWindowLongPtrW(dlg,GWL_EXSTYLE));
+    int W=rc.right-rc.left, H=rc.bottom-rc.top;
+    HWND own=GetWindow(dlg,GW_OWNER);
+    RECT o;
+    if(own && IsWindow(own) && IsWindowVisible(own) && !IsIconic(own)) GetWindowRect(own,&o);
+    else { o.left=0; o.top=0; o.right=GetSystemMetrics(SM_CXSCREEN); o.bottom=GetSystemMetrics(SM_CYSCREEN); }
+    MONITORINFO mi; ZeroMemory(&mi,sizeof(mi)); mi.cbSize=sizeof(mi);
+    HMONITOR mon=MonitorFromRect(&o,MONITOR_DEFAULTTONEAREST);
+    int x=o.left+((o.right-o.left)-W)/2, y=o.top+((o.bottom-o.top)-H)/2;
+    if(GetMonitorInfoW(mon,&mi)){
+        if(x+W>mi.rcWork.right)  x=mi.rcWork.right-W;
+        if(y+H>mi.rcWork.bottom) y=mi.rcWork.bottom-H;
+        if(x<mi.rcWork.left) x=mi.rcWork.left;
+        if(y<mi.rcWork.top)  y=mi.rcWork.top;
+    }
+    SetWindowPos(dlg,NULL,x,y,W,H,SWP_NOZORDER|SWP_NOACTIVATE);
+}
+
+static INT_PTR CALLBACK ConfigDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
+    INT_PTR r;
+    switch(msg) {
+    case WM_INITDIALOG:
+        g_configDlg=dlg;
+        SizeAndCenterConfigDialog(dlg);
+        BuildMainControls(dlg);
+        ApplyConfigDarkMode(dlg);
+        SendMessageW(dlg,DM_SETDEFID,IDOK,0);
+        return TRUE;
+    case WM_NOTIFY: {
+        NMHDR* nh=(NMHDR*)lp;
+        if (nh && nh->idFrom==CFG_TAB && nh->code==TCN_SELCHANGE) {
+            int sel=(int)SendMessageW(g_cfgTab,TCM_GETCURSEL,0,0);
+            for (int i=0;i<2;i++)
+                if (g_cfgPage[i]) ShowWindow(g_cfgPage[i], i==sel ? SW_SHOW : SW_HIDE);
+            return TRUE;
+        }
+        break;
+    }
+    case WM_COMMAND:
+        if (HandleCfgCommand(dlg,LOWORD(wp))) return TRUE;
+        switch(LOWORD(wp)) {
+        case CFG_RESET: ResetPendingPrefs(); return TRUE;
+        case IDOK:      ApplyVisualPrefs(); EndDialog(dlg,IDOK); return TRUE;
+        case IDCANCEL:  EndDialog(dlg,IDCANCEL); return TRUE;
+        }
+        break;
+    case WM_CTLCOLORDLG: case WM_CTLCOLORSTATIC: case WM_CTLCOLORBTN:
+    case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX:
+        if (CfgCtlColor(msg,wp,&r)) return r;
+        break;
+    case WM_DESTROY:
+        g_configDlg=NULL; g_cfgTab=NULL; g_cfgPage[0]=g_cfgPage[1]=NULL;
+        if(g_cfgBrushBg)   { DeleteObject(g_cfgBrushBg);   g_cfgBrushBg=NULL; }
+        if(g_cfgBrushEdit) { DeleteObject(g_cfgBrushEdit); g_cfgBrushEdit=NULL; }
+        g_cfgDark=false;
+        break;
+    }
+    return FALSE;
+}
+
+static void ShowConfigDialog() {
+    INITCOMMONCONTROLSEX icc; icc.dwSize=sizeof(icc); icc.dwICC=ICC_BAR_CLASSES|ICC_TAB_CLASSES; InitCommonControlsEx(&icc);
+    if(g_configDlg && IsWindow(g_configDlg)){ SetForegroundWindow(g_configDlg); return; }
+    g_pending.face=g_fontFace; g_pending.size=g_fontPt; g_pending.spacing=g_lineSpacing; g_pending.align=g_alignment;
+    g_pending.bg=g_cBg; g_pending.cur=g_cCur; g_pending.dim=g_cDim;
+
+    __declspec(align(4)) WORD buf[128];
+    MakeDlgTemplate(buf, 128, DS_MODALFRAME|DS_SETFONT|WS_POPUP|WS_CAPTION|WS_SYSMENU, 0, L"Gen LRC Lyrics - Configurações");
+
+    HWND owner=GetActiveWindow();
+    if(!owner || !IsWindow(owner)) owner=g_hwndWA;
+    DialogBoxIndirectParamW(g_hInst,(LPCDLGTEMPLATEW)buf,owner,ConfigDlgProc,0);
+}
+
+// ---------------------------------------------------------------------------
 // Interface do plugin
 // ---------------------------------------------------------------------------
 static int  PluginInit();
 static void PluginConfig();
 static void PluginQuit();
 
-static char g_desc[] = "Gen LRC Lyrics v1.1.0";
+static char g_desc[] = "Gen LRC Lyrics v1.2.0";
 
 static winampGeneralPurposePlugin g_plugin =
 {
@@ -1797,12 +2265,8 @@ static int PluginInit()
 
 static void PluginConfig()
 {
-    if (!g_embedFrame) return;
-    g_startupPending = false;
-    g_visible = true;
-    ShowWindow(g_embedFrame, SW_SHOW);
-    SetForegroundWindow(g_embedFrame);
-    if (g_hwnd) InvalidateRect(g_hwnd, NULL, FALSE);
+    if (!g_hwndWA) return;
+    ShowConfigDialog();
 }
 
 static void PluginQuit()
@@ -1827,6 +2291,7 @@ static void PluginQuit()
     UnregisterClassW(kClassName, g_hInst);
     if (g_fontNormal) { DeleteObject(g_fontNormal); g_fontNormal = NULL; }
     if (g_fontBold)   { DeleteObject(g_fontBold);   g_fontBold   = NULL; }
+    if (g_configDlg && IsWindow(g_configDlg)) EndDialog(g_configDlg, IDCANCEL);
 }
 
 extern "C" __declspec(dllexport) winampGeneralPurposePlugin* winampGetGeneralPurposePlugin()
