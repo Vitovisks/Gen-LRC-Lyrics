@@ -1,73 +1,66 @@
-# Changelog
+# Gen LRC Lyrics v1.2.0
 
-All notable changes to Gen LRC Lyrics are documented in this file.
+## What's New
 
+### Visual Customization
+- Added font family customization.
+- Added adjustable font size.
+- Added customizable background color.
+- Added customizable current lyric color.
+- Added customizable inactive lyrics color.
+- Added adjustable line spacing.
+- Added lyric alignment options: Left, Center and Right.
 
-## v1.1.0
+### Configuration Window
+- Redesigned the configuration window with WACUP visual integration.
+- Added **Apply**, **Cancel** and **Restore Defaults** buttons.
+- Configuration changes are applied only after clicking Apply.
+- Improved the overall configuration experience.
 
-### New
-- The lyrics window is now a native WACUP window, with a frame, title bar, close button and resizing provided by WACUP.
-- Added "Gen LRC Lyrics" to WACUP's windows menu, with a visible/hidden indicator.
-- Window position and size are now restored correctly.
+### Improvements
+- Improved settings persistence.
+- Improved integration with the WACUP interface.
+- Preserved the existing synchronized lyrics functionality.
 
-### Changed
-- Removed the plugin's custom title bar, close button, border and rounded corners. These are now provided by WACUP.
-- Window title is now "Gen LRC Lyrics".
-
-### Fixed
-- Fixed the window appearing without a border when WACUP starts.
-- Fixed the window returning oversized after restarting WACUP when it had been resized to a smaller size.
-
-Settings (.ini) from v1.0 remain compatible.
-
----
-
-## v1.1.0 (PT-BR)
-
-### Novo
-- A janela de letras agora é uma janela nativa do WACUP, com moldura, barra de título, botão de fechar e redimensionamento fornecidos pelo WACUP.
-- Adicionado "Gen LRC Lyrics" ao menu de janelas do WACUP, com indicação de visível/oculto.
-- Posição e tamanho da janela agora são restaurados corretamente.
-
-### Alterado
-- Removidos a barra de título, o botão de fechar, a borda e os cantos arredondados próprios do plugin. Agora esses elementos são fornecidos pelo WACUP.
-- O título da janela agora é "Gen LRC Lyrics".
-
-### Corrigido
-- Corrigido o problema da janela aparecer sem borda ao iniciar o WACUP.
-- Corrigido o problema da janela voltar com tamanho maior após reiniciar o WACUP, mesmo quando havia sido redimensionada para um tamanho menor.
-
-As configurações (.ini) da v1.0 continuam compatíveis.
-
-
-
-
-## [1.0.0] - 2026-11-01
-
-### Added
-- Initial public release.
-- Synchronized lyrics display.
-- External `.lrc` file support.
-- Embedded lyrics support for MP3, FLAC, OGG, Opus and M4A.
-- Automatic lyrics switching when the playing track changes.
-- Support for lyrics without timestamps.
-- Manual synchronization offset adjustment.
-- Windows installer with automatic WACUP directory detection.
+### Compatibility
+- Maintains compatibility with the existing Gen LRC Lyrics settings.
+- Existing v1.1.0 functionality remains available.
 
 ---
 
-# Histórico de alterações
+**Thank you for using Gen LRC Lyrics!**
 
-Todas as mudanças importantes do Gen LRC Lyrics são registradas neste arquivo.
 
-## [1.0.0] - 2026-11-01
 
-### Adicionado
-- Lançamento público inicial.
-- Exibição de letras sincronizadas.
-- Suporte a arquivos `.lrc` externos.
-- Suporte a letras incorporadas em MP3, FLAC, OGG, Opus e M4A.
-- Troca automática de letras conforme a música reproduzida.
-- Suporte a letras sem marcações de tempo.
-- Ajuste manual de sincronização.
-- Instalador para Windows com detecção automática da pasta do WACUP.
+
+# Gen LRC Lyrics v1.2.0 PT-BR
+
+## O que há de novo
+
+### Personalização Visual
+- Adicionada personalização da família de fontes.
+- Adicionado ajuste de tamanho da fonte.
+- Adicionada cor de fundo personalizável.
+- Adicionada cor personalizável para a letra atual.
+- Adicionada cor personalizável para as letras inativas.
+- Adicionado ajuste de espaçamento entre linhas.
+- Adicionadas opções de alinhamento da letra: Esquerda, Centro e Direita.
+
+### Janela de Configuração
+- Janela de configuração redesenhada com integração visual ao WACUP.
+- Adicionados os botões **Aplicar**, **Cancelar** e **Restaurar Padrões**.
+- As alterações nas configurações só são aplicadas após clicar em "Aplicar".
+- Experiência geral de configuração aprimorada.
+
+### Melhorias
+- Melhorada a persistência das configurações.
+- Melhorada a integração com a interface do WACUP.
+- Mantida a funcionalidade existente de letras sincronizadas.
+
+### Compatibilidade
+- Mantém a compatibilidade com as configurações existentes do Gen LRC Lyrics.
+- A funcionalidade presente na versão 1.1.0 continua disponível.
+
+---
+
+**Obrigado por usar o Gen LRC Lyrics!**
