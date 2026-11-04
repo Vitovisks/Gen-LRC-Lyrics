@@ -1,6 +1,6 @@
 
 #define MyAppName "Gen LRC Lyrics"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "Vitin"
 
 [Setup]
@@ -22,7 +22,7 @@ SolidCompression=yes
 AppComments=Plugin de letras sincronizadas para WACUP.
 AppCopyright=Copyright (C) 2026 Vitin
 UninstallDisplayName=Gen LRC Lyrics
-VersionInfoVersion=1.0.0.0
+VersionInfoVersion=1.2.0.0
 VersionInfoDescription=Gen LRC Lyrics Installer
 VersionInfoProductName=Gen LRC Lyrics
 VersionInfoCompany=Vitin
