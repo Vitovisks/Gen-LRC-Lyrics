@@ -9,14 +9,10 @@ Gen LRC Lyrics is a General Purpose Plugin for Winamp-compatible players, design
 - Synchronized lyrics display.
 - Support for external `.lrc` files.
 - Embedded lyrics support for MP3, FLAC, OGG, Opus and M4A.
-- Automatic lyrics switching when the playing track changes.
 - Support for lyrics without timestamps.
 - Adjustable synchronization offset.
 - Seek through the song by double-clicking a lyric line.
 - Always-on-top window option.
-- Native WACUP window integration, following the current skin.
-- Show or hide the lyrics window through WACUP's windows menu.
-- Saves window position and plugin settings.
 
 ## Compatibility
 
@@ -75,14 +71,10 @@ O Gen LRC Lyrics é um General Purpose Plugin para players compatíveis com Wina
 - Exibição de letras sincronizadas.
 - Suporte a arquivos `.lrc` externos.
 - Leitura de letras incorporadas em MP3, FLAC, OGG, Opus e M4A.
-- Troca automática de letras conforme a música reproduzida.
 - Suporte a letras sem marcações de tempo.
 - Ajuste manual de sincronização.
 - Navegação pela música ao clicar duas vezes em uma linha da letra.
 - Opção de manter a janela sempre visível.
-- Integração com o sistema nativo de janelas do WACUP, acompanhando a skin atual.
-- Opção de mostrar ou ocultar a janela de letras pelo menu de janelas do WACUP.
-- Salva a posição da janela e as configurações do plugin.
 
 ## Compatibilidade
 
